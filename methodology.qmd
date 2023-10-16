@@ -1,0 +1,115 @@
+---
+title: Propuesta de metodología para la priorización de distrito de intervención
+author: Equipo de Gestión de la información y políticas públicas
+format: 
+  docx:
+    reference-doc: reference.docx
+
+execute: 
+  echo: false
+  warning: false
+---
+
+```{r}
+library(tidyverse)
+library(perupobreza2018)
+library(perumapas)
+library(sf)
+library(perusirtod)
+library(flextable)
+```
+
+```{r}
+tbl_basic <- function(.data) {
+	.data |> 
+		flextable() |> 
+		font(fontname = "Arial") |> 
+		fontsize(size = 9, part = "body") |> 
+		fontsize(size = 10, part = "header") |> 
+		bg(bg = "#D8D8D8", part = "header") |> 
+		colformat_int(big.mark = "") |> 
+		theme_box() |> 
+		set_table_properties(layout = "autofit")
+}
+```
+
+El presente documento brinda, a grandes rasgos, la descripción de la metodología utilizada para priorizar un distrito en el que se pueda llevar a cabo una estrategia especializada para la intervención al *microtráfico*.
+
+# Estructura básica de los datos a utilizar
+
+En términos de ubicación física, se requiere que los datos disponibles estén agregados a nivel distrital. Idealmente, se contará con el código de ubicación geográfica del distrito (ubigeo), tal como es utilizado por el Instituto Nacional de Estadística e Informática (INEI). El `ubigeo` debe tener su propia columna en el conjunto de datos. En paralelo, se requiere contar con metadatos a nivel distrital, donde se incluyan los nombres de departamento, provincia, distrito y geometrías (para el dibujado de mapas).
+
+A nivel temporal, se requiere conocer el periodo anual al cual hacen referencia los datos. Esta información debe existir como columna en el conjunto de datos, su nombre puede ser `periodo_anual`.
+
+Cada medición o variable debe existir en su propia columna en el conjunto de datos. Debe tomarse en cuenta que la medición no debe existir en términos absolutos (por ejemplo: número de denuncias, número de detenidos) sino en términos relativos (tasa de denuncia, porcentaje de población con cierta característica, PBI per cápita, etc). Para ello, resulta útil conocer los detalles técnicos de la medición y qué tanto podrían verse sesgados por el factor poblacional. El conjunto de datos puede tener tantos columnas de medición como sean necesarias.
+
+El siguiente conjunto de datos muestra un ejemplo de la estructura básica. Se puede apreciar que se tiene información para 6 ubigeos en el periodo anual 2018. La variable de medición es el porcentaje de la población distrital en condiciones de pobreza monetaria.		
+
+```{r}
+pobreza2018 |> 
+	mutate(periodo_anual = 2018L) |> 
+	select(ubigeo, periodo_anual, pobreza_monetaria) |> 
+	slice_sample(n = 6) |> 
+	tbl_basic()
+```
+
+Para tener un seguimiento a través del tiempo, se requiere que haya múltiples periodos anuales de medición de las mismas variables. En el siguiente conjunto de datos, se pueden ver 9 observaciones de la variable "Intervenciones de serenazgo por consumo de drogas" (3 ubigeos por 3 periodos anuales). 
+
+```{r}
+sirtod_ejemplo <- sirtod_indicadores |> 
+	filter(str_detect(indicador, "consumo de drogas")) |> 
+	select(codigoIndicador) |> 
+	left_join(sirtod_valores) |> 
+	select(-codigoIndicador) |> 
+	rename(periodo_anual = año, int_consumo_drogas = dato) |> 
+	filter(str_starts(ubigeo, "1501")) |> 
+	filter(ubigeo %in% c("150115", "150122", "150129")) |> 
+	filter(periodo_anual %in% 2019:2021) |> 
+	mutate(int_consumo_drogas = as.integer(int_consumo_drogas))
+```
+
+
+```{r}
+sirtod_ejemplo |> 
+	tbl_basic()
+```
+
+Como se mencionó anteriormente, se debe tener cuidado de no utilizar variables con valores absolutos, debido a la alta posibilidad de que en distritos con mayor población haya mayor número de intervenciones. Para evitar este sesgo metodológico se recalcula la variable ponderando el factor población, obteniendo así la "Tasa de intervenciones de serenazgo por consumo de drogas, por 10 mil habitantes". El siguiente cuadro ilustra la ruta para el cálculo usando la población estimada al 2020.
+
+```{r}
+sirtod_ejemplo |> 
+	left_join(pobreza2018) |> 
+	select(ubigeo, periodo_anual, int_consumo_drogas, pob_2020) |> 
+	mutate(tasa_int_consumo_drogas = (int_consumo_drogas/pob_2020) * 10^4) |> 
+	mutate(across(c(int_consumo_drogas, pob_2020), as.integer)) |> 
+	tbl_basic()
+```
+
+Con ello, puede verse que se reduce la magnitud de diferencia entre en las mediciones al comparar distritos con poblaciones diferentes. El siguiente cuadro muestra cómo luciría la tabla después de ser procesada.
+
+```{r}
+tabla_ejemplo <- sirtod_ejemplo |> 
+	left_join(pobreza2018) |> 
+	select(ubigeo, periodo_anual, int_consumo_drogas, pob_2020) |> 
+	mutate(tasa_int_consumo_drogas = (int_consumo_drogas/pob_2020 * 10^4) |> round(1)) |> 
+	select(ubigeo, periodo_anual, tasa_int_consumo_drogas)
+```
+```{r}
+tabla_ejemplo |> 
+	tbl_basic()
+```
+
+Esta tabla servirá como ejemplo para explicar la metodología de cálculo de una medida representativa para cada ubigeo.
+
+# Metodología de agregación de datos
+
+La agregación de datos se realiza para tener condensar múltiples observaciones en un solo valor que sea, en alguna medida específica, representativa de su conjunto. Entre las técnicas más conocidas de agregación se encuentran la obtención de recuentos, sumatorias, y medidas de tendencia central (como promedio, mediana, etc).
+
+Debido a que la estructura básica de datos con la que se trabaja para esta investigación contiene mediciones a lo largo del tiempo se ha buscado obtener una medida que pueda representar:
+
+1. El estado más actual de la observación
+2. Su tendencia, a través de su cambio en un periodo de tiempo determinado
+
+El estado más actual de la observación puede obtenerse fácilmente, extrayendo la medición obtenida en el periodo más reciente.
+
+
