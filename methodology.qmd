@@ -1,9 +1,10 @@
 ---
-title: Propuesta de metodología para la priorización de distrito de intervención
-author: Equipo de Gestión de la información y políticas públicas
+title: "Propuesta de metodología para la priorización de distrito de intervención (parte I)"
+author: "Equipo de Gestión de la información y políticas públicas"
 format: 
   docx:
     reference-doc: reference.docx
+    number-sections: true
 
 execute: 
   echo: false
@@ -20,20 +21,33 @@ library(flextable)
 ```
 
 ```{r}
-tbl_basic <- function(.data) {
-	.data |> 
-		flextable() |> 
-		font(fontname = "Arial") |> 
-		fontsize(size = 9, part = "body") |> 
-		fontsize(size = 10, part = "header") |> 
-		bg(bg = "#D8D8D8", part = "header") |> 
-		colformat_int(big.mark = "") |> 
-		theme_box() |> 
-		set_table_properties(layout = "autofit")
+ft_df_print <- function(ft) {
+	ft |>
+		font(fontname = "Arial") |>
+		fontsize(size = 9, part = "body") |>
+		fontsize(size = 10, part = "header") |>
+		bg(bg = "#D8D8D8", part = "header") |>
+		colformat_int(big.mark = "") |>
+		colformat_double(big.mark = "") |>
+		keep_with_next(part = "all") |> 
+		theme_box() |>
+		set_table_properties(layout = "autofit") 
 }
+
+knitr::opts_chunk$set(ft_show_coltype = FALSE)
+
+set_flextable_defaults(
+	post_process_docx = ft_df_print
+)
+
+use_df_printer()
 ```
 
 El presente documento brinda, a grandes rasgos, la descripción de la metodología utilizada para priorizar un distrito en el que se pueda llevar a cabo una estrategia especializada para la intervención al *microtráfico*.
+
+Este documento explica una técnica para obtejer un puntaje compuesto para una única variable que contiene varias observaciones en el tiempo, con el fin de considerar su información más reciente y al mismo tiempo considerar su variación en el tiempo. Esta técnica puede ser replicada en una gran cantidad de variables numéricas, de manera independiente.
+
+Es necesario que en otro documento se pueda trabajar una metodología para la interacción entre diferentes variables.
 
 # Estructura básica de los datos a utilizar
 
@@ -49,8 +63,7 @@ El siguiente conjunto de datos muestra un ejemplo de la estructura básica. Se p
 pobreza2018 |> 
 	mutate(periodo_anual = 2018L) |> 
 	select(ubigeo, periodo_anual, pobreza_monetaria) |> 
-	slice_sample(n = 6) |> 
-	tbl_basic()
+	slice_sample(n = 6)
 ```
 
 Para tener un seguimiento a través del tiempo, se requiere que haya múltiples periodos anuales de medición de las mismas variables. En el siguiente conjunto de datos, se pueden ver 9 observaciones de la variable "Intervenciones de serenazgo por consumo de drogas" (3 ubigeos por 3 periodos anuales). 
@@ -62,16 +75,15 @@ sirtod_ejemplo <- sirtod_indicadores |>
 	left_join(sirtod_valores) |> 
 	select(-codigoIndicador) |> 
 	rename(periodo_anual = año, int_consumo_drogas = dato) |> 
-	filter(str_starts(ubigeo, "1501")) |> 
-	filter(ubigeo %in% c("150115", "150122", "150129")) |> 
+	filter(str_starts(ubigeo, "1501")) |>
+	filter(ubigeo %in% c("150103", "150105", "150120")) |>
 	filter(periodo_anual %in% 2019:2021) |> 
 	mutate(int_consumo_drogas = as.integer(int_consumo_drogas))
 ```
 
 
 ```{r}
-sirtod_ejemplo |> 
-	tbl_basic()
+sirtod_ejemplo
 ```
 
 Como se mencionó anteriormente, se debe tener cuidado de no utilizar variables con valores absolutos, debido a la alta posibilidad de que en distritos con mayor población haya mayor número de intervenciones. Para evitar este sesgo metodológico se recalcula la variable ponderando el factor población, obteniendo así la "Tasa de intervenciones de serenazgo por consumo de drogas, por 10 mil habitantes". El siguiente cuadro ilustra la ruta para el cálculo usando la población estimada al 2020.
@@ -81,8 +93,7 @@ sirtod_ejemplo |>
 	left_join(pobreza2018) |> 
 	select(ubigeo, periodo_anual, int_consumo_drogas, pob_2020) |> 
 	mutate(tasa_int_consumo_drogas = (int_consumo_drogas/pob_2020) * 10^4) |> 
-	mutate(across(c(int_consumo_drogas, pob_2020), as.integer)) |> 
-	tbl_basic()
+	mutate(across(c(int_consumo_drogas, pob_2020), as.integer)) 
 ```
 
 Con ello, puede verse que se reduce la magnitud de diferencia entre en las mediciones al comparar distritos con poblaciones diferentes. El siguiente cuadro muestra cómo luciría la tabla después de ser procesada.
@@ -95,21 +106,192 @@ tabla_ejemplo <- sirtod_ejemplo |>
 	select(ubigeo, periodo_anual, tasa_int_consumo_drogas)
 ```
 ```{r}
-tabla_ejemplo |> 
-	tbl_basic()
+tabla_ejemplo
 ```
 
 Esta tabla servirá como ejemplo para explicar la metodología de cálculo de una medida representativa para cada ubigeo.
 
 # Metodología de agregación de datos
 
-La agregación de datos se realiza para tener condensar múltiples observaciones en un solo valor que sea, en alguna medida específica, representativa de su conjunto. Entre las técnicas más conocidas de agregación se encuentran la obtención de recuentos, sumatorias, y medidas de tendencia central (como promedio, mediana, etc).
+La agregación de datos se realiza para tener condensar múltiples observaciones en un solo valor que sea, en alguna medida específica, representativa de su conjunto (en este caso, para cada ubigeo). Entre las técnicas más conocidas de agregación se encuentran la obtención de recuentos, sumatorias, y medidas de tendencia central (como promedio, mediana, etc).
 
 Debido a que la estructura básica de datos con la que se trabaja para esta investigación contiene mediciones a lo largo del tiempo se ha buscado obtener una medida que pueda representar:
 
 1. El estado más actual de la observación
 2. Su tendencia, a través de su cambio en un periodo de tiempo determinado
 
-El estado más actual de la observación puede obtenerse fácilmente, extrayendo la medición obtenida en el periodo más reciente.
+A continuación se explica cómo obtener ambas agregaciones y sus limitaciones.
+
+## Agregaciones básicas
+
+El estado más actual de la observación puede obtenerse fácilmente, extrayendo la medición obtenida en el periodo más reciente. Para obtener la tendencia, se calcula la diferencia entre la observación más antigua y la más reciente en términos relativos. En otras palabras, se obtiene el porcentaje de variación. El siguiente cuadro ilustra este proceso para la tabla de ejemplo.
+
+```{r}
+tabla_ejemplo_agregada <- tabla_ejemplo |> 
+	summarise(
+		.by = ubigeo,
+		mas_antigua = first(tasa_int_consumo_drogas, order_by = periodo_anual),
+		mas_reciente = last(tasa_int_consumo_drogas, order_by = periodo_anual),
+		cambio = mas_reciente - mas_antigua,
+		porc_variacion = cambio/mas_antigua*100
+	)
+```
+
+```{r}
+tabla_ejemplo_agregada 
+```
+
+En este ejemplo en particular, resulta valioso apreciar la diferencia entre el ubigeo "150120" y el ubigeo "150105". Se puede ver que en las observaciones más antiguas, la medición de "150120" es de 70.5 intervenciones por cada 10 mil habitantes, alrededor de 6 veces la cantidad que en "150129". Esta diferencia se hace mucho un poco menos evidente en las observaciones más recientes, en la que la tasa de intervenciones en "150120" es alrededor de 2 veces la de "150105". Si se tomara como referencia la medición más reciente, resultaría más importante centrarse en el ubigeo "150120".
+
+Por otro lado, se puede ver que no hubo mucho cambio en términos absolutos para "150103", mientras que en "150120" hubo un decremento de 41.3 unidades. Asimismo, el ubigeo "150105" registro un incremento de 14.8 unidades. Al analizar los cambios en términos relativos (a través del porcentaje de variación), se puede ver que el cambio en "150105" resulta más extremo que en el resto de ubigeos. si se tomara como referencia la variación relativa, habría que centrarse en el ubigeo "150105".
+
+Con toda esta explicación, se está tratando de argumentar que no es suficiente tomar solo la última medición o solo el porcentaje de variación en el tiempo, ya que ambas agregaciones brindan información importante. Ante ello, es necesario elaborar una agregación compuesta, que se alimente de ambas al mismo tiempo.
+
+## Agregación compuesta
+
+La siguiente fórmula ilustra el cálculo necesario para la obtención de un puntaje compuesto. En ella, se asigna el mismo peso (0.5) a cada agregación, de tal modo que `Puntaje` se alimente de ambas en igual medida. Esta formula contiene un error grave, que se explicará en breve.
+
+$$
+Puntaje=(0.5 \times mas\_reciente) + (0.5 \times porc\_variacion)
+$$
+
+La siguiente tabla muestra los resultados obtenidos, ordenados de manera descendente por el puntaje obtenido:
+
+```{r}
+puntaje_sin_normalizar <- tabla_ejemplo_agregada |> 
+	select(ubigeo, mas_reciente, porc_variacion) |> 
+	mutate(puntaje = (0.5*mas_reciente) + (0.5*porc_variacion)) |> 
+	arrange(desc(puntaje))
+```
+
+```{r}
+puntaje_sin_normalizar
+```
+
+
+Con estos resultados, el puntaje obtenido indicaría que se debe priorizar intervenir en el ubigeo "150105" y que además existe una gran distancia entre este y el segundo ubigeo con mayor puntaje. 
+
+Sin embargo, la fórmula previamente mostrada no toma en cuenta que la observación más reciente de la *tasa de intervenciones por 10 mil habitantes* opera en un nivel de abstracción diferente al *porcentaje de variación* de la tasa. Es decir que aplicar la formula sin pre-procesar las variables equivale a sumar gotas de agua con baldes de agua: se obtiene un número pero este no sirve para extraer conclusiones razonables.
+
+Para el pre-procesamiento de estas agregaciones se ha decidido usar una técnica llamada **normalización**[^1]. Esta consiste en re-escalar los valores existentes a un rango entre cero (0) y uno (1), donde el valor mínimo observado se  convierte en cero (0), el valor máximo observado se convierte en uno (1), y el resto de valores se escalan proporcionalmente. La siguiente tabla muestra la aplicación de este proceso a nuestros datos.
+
+[^1]: Para este caso en específico se ha decidio usar la normalización min-max. Existe otra técnica de normalización que escala los valores para obtener un promedio de cero (0) y una desviación estándar de uno (1), que es menos sensible a valores extremos. Se decidió no usar esta otra técnica debido a que los datos ya se encuentran ponderados por población, reduciendo la posible aparición de valores extremos. Además, mantener los valores en una escala del 0 al 1 facilita ponderar el puntaje normalizado por factores que, sumados, equivalgan a 1 también.
+
+```{r}
+tabla_ejemplo_agregada |> 
+	select(ubigeo, mas_reciente, porc_variacion) |> 
+	mutate(
+		norm_reciente = scales::rescale(mas_reciente),
+		norm_variacion = scales::rescale(porc_variacion)
+	)
+```
+
+Puede verse que se obtuvieron las columnas `norm_reciente` y `norm_variacion` como resultado. Teniendo esto, es posible actualizar la forma de cálculo.
+
+$$
+Puntaje=(0.5 \times norm\_reciente) + (0.5 \times norm\_variacion)
+$$
+
+La siguiente tabla muestra el resultado de aplicar la fórmula en el conjunto de datos, ordenados de manera descendente por el puntaje obtenido:
+
+```{r}
+puntaje_normalizado <- tabla_ejemplo_agregada |> 
+	mutate(
+		norm_reciente = scales::rescale(mas_reciente),
+		norm_variacion = scales::rescale(porc_variacion),
+		puntaje = (0.5*norm_reciente) + (0.5*norm_variacion)
+	) |> 
+	select(ubigeo, norm_reciente, norm_variacion, puntaje) |> 
+	arrange(desc(puntaje))
+```
+
+```{r}
+puntaje_normalizado
+```
+
+En este caso, se sigue manteniendo el ubigeo "150105" como el del puntaje más alto, pero se reduce la distancia entre este y el segundo lugar. Sumado a ello, el ubigeo "150120" obtiene un mayor puntaje, ya que se toma mejor en cuenta su medición más reciente, en la que tiene el valor más alto.
+
+## Posibles mejoras
+
+Es posible que el porcentaje de variación muestre cambios extremos en valores inesperados. Por ejemplo, se puede considerar el siguiente ejemplo:
+
+```{r}
+set.seed(123)
+mejoras_ejemplo <- tibble(
+	item = 1:5,
+	mas_antiguo = c(rnorm(4, 45, 5), 0.5),
+	mas_reciente = c(rnorm(4, 50, 5), 3),
+)
+```
+
+```{r}
+mejoras_ejemplo
+```
+
+Resulta evidente que el item 5 tiene valores muy bajos en comparación con el resto. Sin embargo, al realizar el cálculo del puntaje con variables normalizadas, se obtiene el siguiente resultado (ordenado en forma descendente según puntaje).
+
+```{r}
+get_composite_score <- function(last_value, rate_of_change, wt_last_value) {
+	(wt_last_value * last_value) + ((1-wt_last_value) * rate_of_change)
+}
+```
+
+
+```{r}
+mejoras_ejemplo |> 
+	mutate(
+		cambio = mas_reciente - mas_antiguo,
+		porc_variacion = cambio/mas_antiguo*100,
+		norm_reciente = scales::rescale(mas_reciente),
+		norm_variacion = scales::rescale(porc_variacion),
+		puntaje = get_composite_score(norm_reciente, norm_variacion, 0.5)
+	) |> 
+	arrange(desc(puntaje)) |> 
+	select(-mas_antiguo, -cambio)
+```
+
+Se puede ver que el item 5 aparece en segundo lugar, superando a items que tienen valores mucho mayores en su observación más reciente. Esto se debe a que su porcentaje de variación es extremadamente mayor que el del resto. Para contrarestar este efecto, se puede actualizar la fórmula de la siguiente manera:
+
+$$
+Puntaje=(wt\_reciente \times norm\_reciente) + ((1-wt\_reciente) \times norm\_variacion)
+$$
+
+Donde:
+
+- $wt\_reciente$: Peso asignado al valor más reciente
+- $norm\_reciente$: Valor más reciente, normalizado
+- $norm\_variacion$: Porcentaje de variación, normalizado
+
+En los cálculos anteriores, $wt\_reciente$ tenía un valor de 0.5, lo que le asignaba la misma importancia al valor más reciente y al porcentaje de variación. Si se le asigna un valor de 0.6 a $wt_\reciente$ se obtienen los siguientes puntajes:
+
+```{r}
+mejoras_ejemplo |> 
+	mutate(
+		cambio = mas_reciente - mas_antiguo,
+		porc_variacion = cambio/mas_antiguo*100,
+		norm_reciente = scales::rescale(mas_reciente),
+		norm_variacion = scales::rescale(porc_variacion),
+		puntaje = get_composite_score(norm_reciente, norm_variacion, 0.6)
+	) |> 
+	arrange(desc(puntaje)) |> 
+	select(-mas_antiguo, -cambio)
+```
+
+Como puede verse, de esta manera se reduce el peso que el porcentaje de variación tiene en el puntaje final. Es necesario probar otros límites de la fórmula hasta ir consiguiendo versiones más optimas y más robustas a valores extremos.
+
+
+
+```{r}
+# mejoras_ejemplo |> 
+# 	mutate(
+# 		cambio = mas_reciente - mas_antiguo,
+# 		porc_variacion = cambio/mas_antiguo*100,
+# 		norm_reciente = scales::rescale(mas_reciente),
+# 		norm_variacion = scale(porc_variacion),
+# 		puntaje = get_composite_score(norm_reciente, norm_variacion, 0.5)
+# 	) |> 
+# 	arrange(desc(puntaje)) |> 
+# 	select(-mas_antiguo, -cambio)
+```
 
 
