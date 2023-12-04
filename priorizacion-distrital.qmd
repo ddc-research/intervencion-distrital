@@ -1,0 +1,382 @@
+---
+title: "Propuesta de metodología para la priorización de distrito de intervención (parte 3)"
+author: "Equipo de Gestión de la información y políticas públicas"
+format: 
+  docx:
+    reference-doc: reference.docx
+    number-sections: true
+
+execute: 
+  echo: false
+  warning: false
+  
+fig-width: 8
+fig-height: 5
+---
+
+El presente documento brinda, a grandes rasgos, la descripción de la metodología utilizada para priorizar un distrito en el que se pueda llevar a cabo una estrategia especializada para la intervención al microtráfico. Se entiende que el lector está familiarizado con las explicaciones brindadas en documentos anteriores acerca de la metodología de agregación de datos y los resultados calculados con variables de ejemplo.
+
+Debe tenerse en cuenta que todos los resultados comprenden a los distritos de Lima Metropolitana y Callao con periodo anual hasta el 2022. La fuente de los datos es DATACRIM-INEI, apartado de denuncias policiales por lugar de hecho.
+
+```{r}
+library(tidyverse)
+library(perupobreza2018)
+library(perumapas)
+library(sf)
+library(flextable)
+```
+
+```{r}
+ft_df_print <- function(ft) {
+	ft |>
+		font(fontname = "Arial") |>
+		fontsize(size = 9, part = "body") |>
+		fontsize(size = 10, part = "header") |>
+		bg(bg = "#D8D8D8", part = "header") |>
+		colformat_int(big.mark = "") |>
+		colformat_double(big.mark = "", digits = 3) |>
+		keep_with_next(part = "all") |> 
+		theme_box() |>
+		set_table_properties(layout = "autofit") 
+}
+
+knitr::opts_chunk$set(ft_show_coltype = FALSE)
+
+set_flextable_defaults(
+	post_process_docx = ft_df_print
+)
+
+use_df_printer()
+```
+
+```{r}
+ubigeo_abr <- readxl::read_excel("ubigeo_abreviaturas.xlsx") |> 
+  select(ubigeo, abr)
+```
+
+```{r}
+mapa_lima_callao <- mapa_distrital |> 
+  filter(provincia %in% c("LIMA", "CALLAO"))
+```
+
+```{r}
+poblacion2020 <- pobreza2018 |> 
+  select(ubigeo, pob_2020)
+```
+
+```{r}
+# Esto va a permitir más adelante filtrar para delitos que no se quieren incluir
+listado_delitos_incluidos <-
+  c(
+    # "DELITOS MONETARIOS",
+    # "DELITOS INFORMATICOS",
+    "EXTORSION",
+    "ROBO AGRAVADO",
+    # "USURPACION",
+    # "DELITOS CONTRA LA ADMINISTRACION PUBLICA",
+    "SECUESTRO",
+    "FABRICACION, SUMINISTRO O TENENCIA DE MATERIALES PELIGROSOS",
+    "MICROCOMERCIALIZACION O MICROPRODUCCION",
+    "HOMICIDIO CALIFICADO",
+    "SICARIATO",
+    # "MINERIA ILEGAL",
+    # "TRAFICO ILEGAL DE PRODUCTOS FORESTALES",
+    "TRAFICO ILICITO DE DROGAS"
+  )
+
+# Se lee la data de delitos tipificados pero solo nos quedamos con Lima metropolitana y Callao hasta 2022
+delitos_tipificados <- read_rds("data/datacrim_denuncias_tipificado_crimen_organisado.rds") |> 
+  mutate(departamento = departamento |> 
+      str_remove(" 1/") |> 
+      str_remove("PROVINCIA CONSTITUCIONAL DEL ")
+  ) |> 
+  filter(!is.na(tipo_crimen_organizado)) |> 
+  filter(departamento %in% c("LIMA METROPOLITANA", "CALLAO")) |> 
+  filter(tipo_crimen_organizado %in% listado_delitos_incluidos) |> 
+  filter(periodo_anual <= 2022) 
+
+```
+
+```{r}
+make_plot_tipo_crimen <- function(tipo) {
+  filtrado <- delitos_tipificados |>
+    filter(tipo_crimen_organizado == tipo)
+
+  n_modalidades <- n_distinct(filtrado$modalidad)
+
+  settings <- list(
+    wrap_width = 80
+  )
+
+  if (n_modalidades > 6) {
+    settings$wrap_width <- 30
+  }
+
+  grafico_base <- filtrado |>
+    mutate(
+      modalidad = modalidad |>
+        str_wrap(width = settings$wrap_width) |>
+        fct_infreq(w = n_faltas) |>
+        fct_lump_n(n = 8, w = n_faltas, other_level = "Otros")
+    ) |>
+    count(periodo_anual, modalidad, wt = n_faltas, sort = TRUE) |>
+    ggplot(aes(periodo_anual, n)) +
+    geom_line() +
+    geom_text(aes(label = n)) +
+    labs(
+      title = tipo
+    ) +
+    theme_light() +
+    theme(
+      legend.position = "none"
+    )
+
+  if (n_modalidades > 1) {
+    grafico_base <- grafico_base +
+      facet_wrap(~modalidad, dir = "v")
+  }
+
+  grafico_base
+}
+
+graficos_tipo_de_crimen <- delitos_tipificados |>
+  pull(tipo_crimen_organizado) |>
+  unique() |>
+  map(make_plot_tipo_crimen)
+```
+
+# Tipos de crimen
+
+Se ha considerado el siguiente listado de tipos de crimen organizado, tomando en cuenta la normativa actual y su posible relevancia frente al Tráfico Ilícito de Drogas.
+
+```{r}
+#| results: asis
+delitos_tipificados |> 
+  pull(tipo_crimen_organizado) |> 
+  unique() |> 
+  str_to_sentence() |> 
+  walk(~cat("- ", .x, "\n"))
+```
+
+El siguiente gráfico muestra la evolución en el tiempo de los delitos seleccionados. Puede verse que "Robo agravado" Y "Delitos contra la administración pública" tienen mayor presencia que los demás delitos.
+
+```{r}
+delitos_tipificados |> 
+  count(periodo_anual, tipo_crimen_organizado, wt = n_faltas) |> 
+  mutate(label_tipo = if_else(periodo_anual == 2022, tipo_crimen_organizado, NA), .by = tipo_crimen_organizado) |> 
+  mutate(label_tipo = if_else(label_tipo %in% c("ROBO AGRAVADO", "DELITOS CONTRA LA ADMINISTRACION PUBLICA"), label_tipo, NA)) |> 
+  ggplot(aes(periodo_anual, n)) +
+  geom_line(aes(color = tipo_crimen_organizado)) +
+  # scale_color_discrete(guide = guide_legend(ncol = 3)) +
+  geom_text(
+    mapping = aes(color = tipo_crimen_organizado, label = label_tipo), 
+    hjust = 1,
+    size = 2.5,nudge_y = 1000
+  )+
+  theme_light() +
+  theme(
+    legend.position = "none",
+    legend.title = element_blank(),
+    axis.title = element_blank()
+  )
+```
+
+Al centrarnos en los otros tipos de delitos, podemos ver que los delitos de usurpación, , microcomercialización, extorsión y tráfico ilícito de drogas vienen siendo los más frecuentes en los últimos años. Se puede ver también un incremento sustancial en la comisión de delitos de extorsión.
+
+```{r}
+delitos_tipificados |> 
+  count(periodo_anual, tipo_crimen_organizado, wt = n_faltas) |> 
+  filter(tipo_crimen_organizado != "ROBO AGRAVADO") |> 
+  filter(tipo_crimen_organizado != "DELITOS CONTRA LA ADMINISTRACION PUBLICA") |> 
+  mutate(tipo_crimen_organizado = str_wrap(tipo_crimen_organizado, 40)) |> 
+  mutate(label_tipo = if_else(periodo_anual == 2022, tipo_crimen_organizado, NA), .by = tipo_crimen_organizado) |> 
+  ggplot(aes(periodo_anual, n)) +
+  geom_line(aes(color = tipo_crimen_organizado)) +
+  geom_point(aes(color = tipo_crimen_organizado)) +
+  ggrepel::geom_text_repel(
+    mapping = aes(color = tipo_crimen_organizado, label = label_tipo), 
+    hjust = 0,
+    size = 2.5,
+    direction = "y",
+    nudge_x = 0.1
+  )+
+  scale_x_continuous(
+    limits = c(2015, 2026), 
+    breaks = ~seq(.x[1], .x[2]) |> as.integer(),
+    labels = ~if_else(.x > 2022, "", as.character(.x)),
+    minor_breaks = NULL
+  ) +
+  scale_y_continuous(
+    minor_breaks = ~seq(0, .x[2], by = 100)
+  ) +
+  scale_color_discrete(guide = guide_legend(ncol = 3, override.aes = list(label = ""))) +
+  theme_light() +
+  theme(
+    legend.position = "none",
+    legend.title = element_blank(),
+    axis.title = element_blank()
+  )
+```
+
+Aunque son menos frecuentes, no debe dejar de preocupar la existencia de crímenes de secuestro, homicidio calificado, sicariato y minería ilegal, por el potencial de impacto que tienen en la vida de las personas o la economía.
+
+El Anexo 1 muestra la evolución en el tiempo por modalidad, de acuerdo al tipo de crimen presentado previamente. Revisar dicha sección permitirá tener más contexto respecto a qué tipo de denuncias en específico se están considerando dentro de cada tipo de crimen.
+
+# Agregación de datos
+
+Teniendo conocimiento de la evolución de la ocurrencia de los tipos de crimen mencionados, se requiere agregar los datos a un solo valor distrital por cada tipo de crimen.  Para ello, se comienza calculando la tasa de ocurrencia de los diferentes delitos. Esto sirve para evitar que distritos con mayor población estén sobrerepresentados en los cálculos posteriores.
+
+```{r}
+calculo_tasa <- delitos_tipificados |> 
+  count(ubigeo, periodo_anual, tipo_crimen_organizado, wt = n_faltas) |> 
+  left_join(poblacion2020) |> 
+  mutate(tasa = n/pob_2020*10^4) |> 
+  select(-pob_2020, -n)
+```
+
+Una vez obtenida la tasa de ocurrencia, se realiza una agregación compuesta para cada distrito. En ella se toma en cuenta los siguientes valores (previa normalización):
+
+1. El valor más reciente de la tasa de ocurrencia 
+2. El porcentaje de variación entre el valor más antiguo y el más reciente. 
+
+Esto se expresa en la siguiente fórmula:
+
+$$
+Puntaje=(wt\_reciente \times norm\_reciente) + ((1-wt\_reciente) \times norm\_variacion)
+$$
+
+Donde:
+
+- $norm\_reciente$: Valor más reciente, normalizado.
+- $norm\_variacion$: Porcentaje de variación, normalizado.
+- $wt\_reciente$: Peso asignado al valor más reciente. Por defecto se usará 0.5 para que ambos valores tengan el mismo peso.
+
+```{r}
+wt_reciente <- 0.5
+
+puntajes <- calculo_tasa |> 
+  summarise(
+    .by = c(tipo_crimen_organizado, ubigeo),
+    mas_antigua = first(tasa, order_by = periodo_anual),
+		mas_reciente = last(tasa, order_by = periodo_anual),
+		cambio = mas_reciente - mas_antigua,
+		porc_variacion = cambio/mas_antigua*100
+  ) |> 
+  mutate(
+    .by = c(tipo_crimen_organizado),
+    norm_reciente = scales::rescale(mas_reciente),
+		norm_variacion = scales::rescale(porc_variacion),
+		puntaje = (wt_reciente*norm_reciente) + ((1-wt_reciente)*norm_variacion)
+  ) |> 
+  arrange(tipo_crimen_organizado) |> 
+  select(tipo_crimen_organizado, ubigeo, puntaje)
+```
+
+El Anexo 2 contiene mapas que muestran los puntajes obtenidos a nivel distrital para cada tipo de crimen.
+
+Al promediar los puntajes de todos los tipos de crimen, se obtiene un solo valor por distrito que sirve para establecer un ranking de priorización.
+
+```{r}
+puntaje_promedio <- puntajes |> 
+  summarise(
+    .by = ubigeo,
+    puntaje = mean(puntaje)
+  ) |> 
+  arrange(desc(puntaje))
+```
+
+```{r}
+puntaje_promedio |> 
+  left_join(mapa_distrital) |> 
+  select(ubigeo, departamento, distrito, puntaje) |> 
+  mutate("Nº" = row_number(), .before = 1L) |> 
+  flextable() |> 
+  ft_df_print()
+```
+
+El siguiente mapa ilustra el ranking anterior de manera geográfica:
+
+```{r}
+make_plot_distrital <- function(.data, title = NULL) {
+  mapa_lima_callao |> 
+    left_join(ubigeo_abr) |> 
+    left_join(.data) |> 
+    mutate(label = str_trunc(distrito, 12)) |> 
+    ggplot() +
+    geom_sf(aes(geometry = geometry, fill = puntaje)) +
+    geom_text(
+      mapping = aes(geometry = geometry, label = abr), 
+      stat = "sf_coordinates",
+      size = 2.5
+    ) +
+    scale_fill_viridis_c(
+      option = "F", 
+      direction = -1,
+      begin = 0.5
+    ) +
+    labs(
+      title = title,
+      fill = "Puntaje"
+    ) +
+    theme_light() +
+    theme(
+      legend.position = "bottom",
+      axis.text = element_blank(),
+      axis.ticks = element_blank(),
+      legend.key.height = unit(4, "mm"),
+      legend.key.width = unit(15, "mm"),
+      axis.title = element_blank()
+    )
+}
+```
+
+
+```{r}
+#| fig-width: 8
+#| fig-height: 12
+puntaje_promedio |> 
+  make_plot_distrital(title = "Puntaje de priorización de intervención")
+```
+
+# Posibles mejoras
+
+- Incrementar variables
+- Remover delitos irrelevantes
+- Asignar pesos distintos a cada delito en lugar de promediarlos. Podría hacerse basado en el tiempo de condena establecido en el código penal
+- Asignar otros pesos al ponderar valor más reciente vs tasa de cambio.
+- Incluir o remover modalidades dentro de cada delito, requiere conocimiento legal
+- Calcular otros puntajes basado en otro tipo de data (formalidad económica, educación, participación política, victimización, etc)
+
+\pagebreak
+
+# Anexos
+
+## Evolución en el tiempo, por modalidades de crimen
+
+```{r}
+graficos_tipo_de_crimen |> 
+  walk(print)
+```
+
+\pagebreak
+
+## Puntajes distritales, por modalidades de crimen
+
+```{r}
+#| fig-width: 8
+#| fig-height: 12
+puntajes |> 
+  pull(tipo_crimen_organizado) |> 
+  unique() |> 
+  # pluck(1L) |> 
+  map(~{
+    puntajes |> 
+      filter(tipo_crimen_organizado == .x) |> 
+      make_plot_distrital(title = str_to_sentence(.x))
+  }) |> 
+  walk(print)
+```
+
+
+
+
